@@ -1,0 +1,8 @@
+*.idea/
+outdir
+__pycache__/
+filelists/
+
+*.so
+*.pyc
+
