@@ -2,6 +2,8 @@
 outdir
 __pycache__/
 filelists/
+.ipynb_checkpoints/
+results/
 
 *.so
 *.pyc

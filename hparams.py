@@ -15,7 +15,7 @@ def create_hparams(hparams_string=None, verbose=False):
         seed=1234,
         dynamic_loss_scaling=True,
         fp16_run=False,
-        distributed_run=True,
+        distributed_run=False,
         dist_backend="nccl",
         dist_url="tcp://localhost:54321",
         cudnn_enabled=True,
@@ -82,7 +82,23 @@ def create_hparams(hparams_string=None, verbose=False):
         weight_decay=1e-6,
         grad_clip_thresh=1.0,
         batch_size=16,
-        mask_padding=True  # set model's padded outputs to padded values
+        mask_padding=True, # set model's padded outputs to padded values
+
+        ################################
+        # Vocoder Parameters           #
+        ################################
+        use_lws=True, # Only used to set as True if using WaveNet, no difference in performance is observed in either cases.
+        signal_normalization=True, # Whether to normalize mel spectrograms to some predefined range (following below parameters)
+        allow_clipping_in_normalization = False,  # Only relevant if mel_normalization = True
+        symmetric_mels=True, # Whether to scale the data to be symmetric around 0. (Also multiplies the output range by 2, faster and cleaner convergence)
+        max_abs_value=4., # max absolute value of data. If symmetric, data will be [-max, max] else [0, max] (Must not be too big to avoid gradient explosion, # not too small for fast convergence)
+        min_level_db=-100,
+        ref_level_db=20,
+        # Griffin Lim
+        power=1.5,  # Only used in G&L inversion, usually values between 1.2 and 1.5 are a good choice.
+        griffin_lim_iters=60,  # Number of G&L iterations, typically 30 is enough but we use 60 to ensure convergence.
+        preemphasize=True,  # whether to apply filter
+        preemphasis=0.97,  # filter coefficient.
     )
 
     # if hparams_string:
