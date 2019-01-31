@@ -16,7 +16,7 @@ from model import Tacotron2
 from data_utils import TextMelLoader, TextMelCollate
 from loss_function import Tacotron2Loss
 from logger import Tacotron2Logger
-from hparams import create_hparams
+from hparams_thchs30 import create_hparams
 
 
 def batchnorm_to_float(module):

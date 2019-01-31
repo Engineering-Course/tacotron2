@@ -26,6 +26,42 @@ def load_filepaths_and_text(filename, split="|"):
         filepaths_and_text = [line.strip().split(split) for line in f]
     return filepaths_and_text
 
+##########################################
+## load file of thchs30 dataset        ###
+##########################################
+
+
+# punctuate
+def segment(zhText,pinyinText):
+
+    arr = pinyinText.split(" ")
+    result = ""
+    index = 0
+    for j in zhText:
+        if(j != ' ' and index < len(arr)):
+            result += arr[index] + " "
+            index += 1
+        else:
+            result += " "
+    return result
+
+def load_filepaths_and_text_thchs30(filename):
+    filepaths_and_text= []
+    with open(filename, encoding='utf-8') as f:
+        trn_files = f.readlines()
+    for trn in trn_files:
+        wav_path = trn[:-5]
+        with open(trn[:-1], encoding='utf-8') as f:
+            zhText = f.readline()
+            pinyinText = f.readline()[:-1]
+            text = segment(zhText, pinyinText)[:-2]
+        filepaths_and_text.append([wav_path, text])
+    return filepaths_and_text
+
+
+##############################################
+##############################################
+
 
 def to_gpu(x):
     x = x.contiguous()
