@@ -18,7 +18,7 @@ from utils import save_wav, plot_alignment, inv_mel_spectrogram
 
 def synthesis_mel(model, text):
     # Prepare text input
-    sequence = np.array(text_to_sequence(text, ['english_cleaners']))[None, :]
+    sequence = np.array(text_to_sequence(text, ['basic_cleaners']))[None, :]
     sequence = torch.autograd.Variable(torch.from_numpy(sequence)).cuda().long()
     mel_outputs, mel_outputs_postnet, _, alignments = model.inference(sequence)
     return mel_outputs_postnet, alignments
