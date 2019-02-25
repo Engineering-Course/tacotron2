@@ -6,7 +6,7 @@ import torch
 import argparse
 import timeit
 
-from hparams import create_hparams
+from hparams_bznsyp import create_hparams
 from model import Tacotron2
 from layers import TacotronSTFT
 from audio_processing import griffin_lim
