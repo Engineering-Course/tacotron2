@@ -36,8 +36,8 @@ def tts(model, waveglow, text, hparams):
     print ('text to mel: {}'.format(timeit.default_timer() - start_time))
 
     start_time = timeit.default_timer()
-    # audio = synthesis_audio_wavenet(waveglow, mel)
-    audio = inv_mel_spectrogram(mel.data.cpu().numpy()[0], hparams)
+    audio = synthesis_audio_wavenet(waveglow, mel)
+    # audio = inv_mel_spectrogram(mel.data.cpu().numpy()[0], hparams)
     print ('mel to audio: {}'.format(timeit.default_timer() - start_time))
 
     return audio, alignments.data.cpu().numpy()[0].T
