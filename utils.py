@@ -7,7 +7,7 @@ import lws
 from scipy import signal
 import librosa
 import librosa.filters
-
+import os
 
 def get_mask_from_lengths(lengths):
     max_len = torch.max(lengths).item()
@@ -24,7 +24,9 @@ def load_wav_to_torch(full_path):
 def load_filepaths_and_text(filename, split="|"):
     with open(filename, encoding='utf-8') as f:
         filepaths_and_text = [line.strip().split(split) for line in f]
-    return filepaths_and_text
+    paths = filename.split("/")
+    folder = "/".join(paths[:-1])
+    return filepaths_and_text, folder
 
 
 def to_gpu(x):

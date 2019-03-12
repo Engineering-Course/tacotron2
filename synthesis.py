@@ -7,21 +7,19 @@ import argparse
 import timeit
 
 from hparams import create_hparams
-from model import Tacotron2
-from layers import TacotronSTFT
 from audio_processing import griffin_lim
 from train import load_model
 from text import text_to_sequence
-from utils import save_wav, plot_alignment, inv_mel_spectrogram
-
+from audio_processing import inv_spectrogram
+from utils import plot_alignment, inv_mel_spectrogram, save_wav
 
 
 def synthesis_mel(model, text):
     # Prepare text input
     sequence = np.array(text_to_sequence(text, ['english_cleaners']))[None, :]
     sequence = torch.autograd.Variable(torch.from_numpy(sequence)).cuda().long()
-    mel_outputs, mel_outputs_postnet, _, alignments = model.inference(sequence)
-    return mel_outputs_postnet, alignments
+    mel_outputs, mel_outputs_postnet, _, linear_outputs, alignments = model.inference(sequence)
+    return mel_outputs_postnet, linear_outputs, alignments
 
 
 def synthesis_audio_wavenet(waveglow, mel):
@@ -32,15 +30,19 @@ def synthesis_audio_wavenet(waveglow, mel):
 
 def tts(model, waveglow, text, hparams):
     start_time = timeit.default_timer()
-    mel, alignments = synthesis_mel(model, text)
+    mel, linear, alignments = synthesis_mel(model, text)
     print ('text to mel: {}'.format(timeit.default_timer() - start_time))
 
     start_time = timeit.default_timer()
     # audio = synthesis_audio_wavenet(waveglow, mel)
     audio = inv_mel_spectrogram(mel.data.cpu().numpy()[0], hparams)
-    print ('mel to audio: {}'.format(timeit.default_timer() - start_time))
+    print('mel to audio: {}'.format(timeit.default_timer() - start_time))
 
-    return audio, alignments.data.cpu().numpy()[0].T
+    start_time = timeit.default_timer()
+    linear_audio = inv_spectrogram(linear.data.cpu().numpy()[0], hparams)
+    print ('linear to audio: {}'.format(timeit.default_timer() - start_time))
+
+    return audio, linear_audio, alignments.data.cpu().numpy()[0].T
     
     
 
@@ -74,10 +76,12 @@ if __name__ == "__main__":
         for idx, line in enumerate(lines):
             start_time = timeit.default_timer()
             text = line.decode("utf-8")[:-1]
-            audio, alignments = tts(model, waveglow, text, hparams)
-            dst_wav_path = os.path.join(args.output_directory, "{}.wav".format(idx))
+            audio, linear_audio, alignments = tts(model, waveglow, text, hparams)
             end_time = timeit.default_timer()
-            save_wav(audio, dst_wav_path, hparams)
+            dst_mel_wav_path = os.path.join(args.output_directory, "{}_mel.wav".format(idx))
+            save_wav(audio, dst_mel_wav_path, hparams)
+            dst_linear_wav_path = os.path.join(args.output_directory, "{}_linear.wav".format(idx))
+            save_wav(linear_audio, dst_linear_wav_path, hparams)
             print ('synthesized {} audio, using {} seconds'.format(idx, end_time-start_time))
 
             dst_alignment_path = os.path.join(args.output_directory, "{}_alignment.png".format(idx))

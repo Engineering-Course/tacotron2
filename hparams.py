@@ -25,8 +25,8 @@ def create_hparams(hparams_string=None, verbose=False):
         # Data Parameters             #
         ################################
         load_mel_from_disk=True,
-        training_files='ljspeech/ljs_train.txt',
-        validation_files='ljspeech/ljs_val.txt',
+        training_files='data/ljspeech/ljs_train.txt',
+        validation_files='data/ljspeech/ljs_val.txt',
         text_cleaners=['english_cleaners'],
 
         ################################
@@ -48,7 +48,7 @@ def create_hparams(hparams_string=None, verbose=False):
         symbols_embedding_dim=512,
 
         # Encoder parameters
-        encoder_kernel_size=5,
+        encoder_kernel_size=3,
         encoder_n_convolutions=3,
         encoder_embedding_dim=512,
 
@@ -79,7 +79,7 @@ def create_hparams(hparams_string=None, verbose=False):
         n_speakers=1,
         speaker_embed_dim=16,
         dropout=0.05,
-        downsample_step=2,
+        downsample_step=1,
         converter_kernel_size=3,
 
         ################################
@@ -89,7 +89,7 @@ def create_hparams(hparams_string=None, verbose=False):
         learning_rate=1e-3,
         weight_decay=1e-6,
         grad_clip_thresh=1.0,
-        batch_size=16,
+        batch_size=8,
         mask_padding=True, # set model's padded outputs to padded values
 
         ################################

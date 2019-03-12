@@ -2,6 +2,7 @@ import random
 import numpy as np
 import torch
 import torch.utils.data
+import os
 
 import layers
 from utils import load_wav_to_torch, load_filepaths_and_text
@@ -15,7 +16,7 @@ class TextMelLoader(torch.utils.data.Dataset):
         3) computes mel-spectrograms from audio files.
     """
     def __init__(self, audiopaths_and_text, hparams):
-        self.audiopaths_and_text = load_filepaths_and_text(audiopaths_and_text)
+        self.audiopaths_and_text, self.folder = load_filepaths_and_text(audiopaths_and_text)
         self.text_cleaners = hparams.text_cleaners
         self.max_wav_value = hparams.max_wav_value
         self.sampling_rate = hparams.sampling_rate
@@ -38,8 +39,8 @@ class TextMelLoader(torch.utils.data.Dataset):
         # separate filename and text
         linearpath, melpath, text = audiopath_and_text[0], audiopath_and_text[1], audiopath_and_text[3]
         text = self.get_text(text)
-        mel = self.get_mel(melpath)
-        linear = self.get_linear(linearpath)
+        mel = self.get_mel(os.path.join(self.folder, melpath))
+        linear = self.get_linear(os.path.join(self.folder, linearpath))
         return (text, mel, linear)
 
     def get_mel(self, filename):
@@ -55,6 +56,8 @@ class TextMelLoader(torch.utils.data.Dataset):
             melspec = torch.squeeze(melspec, 0)
         else:
             melspec = torch.from_numpy(np.load(filename))
+            melspec = melspec.transpose(1, 0)
+            # print (melspec.size())
             assert melspec.size(0) == self.stft.n_mel_channels, (
                 'Mel dimension mismatch: given {}, expected {}'.format(
                     melspec.size(0), self.stft.n_mel_channels))
@@ -63,6 +66,8 @@ class TextMelLoader(torch.utils.data.Dataset):
 
     def get_linear(self, filename):
         linearspec = torch.from_numpy(np.load(filename))
+        linearspec = linearspec.transpose(1, 0)
+        # print (linearspec.size())
         return linearspec
 
 
@@ -115,7 +120,7 @@ class TextMelCollate():
         gate_padded.zero_()
 
         num_linear = batch[0][2].size(0)
-        max_target_linear_len = max([x[2].size(2) for x in batch])
+        max_target_linear_len = max([x[2].size(1) for x in batch])
         linear_padded = torch.FloatTensor(len(batch), num_linear, max_target_linear_len)
         linear_padded.zero_()
 
@@ -124,7 +129,7 @@ class TextMelCollate():
             mel = batch[ids_sorted_decreasing[i]][1]
             mel_padded[i, :, :mel.size(1)] = mel
             gate_padded[i, mel.size(1)-1:] = 1
-            linear = batch[ids_sorted_decreasing][i][2]
+            linear = batch[ids_sorted_decreasing[i]][2]
             linear_padded[i, :, :linear.size(1)] = linear
             output_lengths[i] = mel.size(1)
 

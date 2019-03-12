@@ -350,6 +350,10 @@ class Decoder(nn.Module):
             hparams.decoder_rnn_dim + hparams.encoder_embedding_dim, 1,
             bias=True, w_init_gain='sigmoid')
 
+        self.context_layer = ConvNorm(
+            hparams.encoder_embedding_dim + hparams.attention_rnn_dim, hparams.converter_channels,
+            kernel_size=1, stride=1, w_init_gain='tanh')
+
     def get_go_frame(self, memory):
         """ Gets all zeros frames to use as first decoder input
         PARAMS
@@ -418,7 +422,7 @@ class Decoder(nn.Module):
         decoder_inputs = decoder_inputs.transpose(0, 1)
         return decoder_inputs
 
-    def parse_decoder_outputs(self, mel_outputs, gate_outputs, alignments, decoder_hidden_attention_context):
+    def parse_decoder_outputs(self, mel_outputs, gate_outputs, alignments, contexts):
         """ Prepares decoder outputs for output
         PARAMS
         ------
@@ -447,9 +451,9 @@ class Decoder(nn.Module):
 
         # decoder state (B x T x C):
         # internal representation before compressed to output dimention
-        decoder_hidden_attention_context = decoder_hidden_attention_context.transpose(1, 2).contiguous()
+        # decoder_hidden_attention_context = decoder_hidden_attention_context.transpose(1, 2).contiguous()
 
-        return mel_outputs, gate_outputs, alignments, decoder_hidden_attention_context
+        return mel_outputs, gate_outputs, alignments, contexts
 
     def decode(self, decoder_input):
         """ Decoder step using stored states, attention and memory
@@ -519,19 +523,21 @@ class Decoder(nn.Module):
         self.initialize_decoder_states(
             memory, mask=~get_mask_from_lengths(memory_lengths))
 
-        mel_outputs, gate_outputs, alignments = [], [], []
+        mel_outputs, gate_outputs, alignments, contexts = [], [], [], []
         while len(mel_outputs) < decoder_inputs.size(0) - 1:
             decoder_input = decoder_inputs[len(mel_outputs)]
-            mel_output, gate_output, attention_weights, decoder_hidden_attention_context = self.decode(
-                decoder_input)
+            mel_output, gate_output, attention_weights, context = self.decode(decoder_input)
             mel_outputs += [mel_output.squeeze(1)]
             gate_outputs += [gate_output.squeeze()]
             alignments += [attention_weights]
+            contexts += [context.squeeze(1)]
 
-        mel_outputs, gate_outputs, alignments, decoder_hidden_attention_context = self.parse_decoder_outputs(
-            mel_outputs, gate_outputs, alignments, decoder_hidden_attention_context)
+        contexts = torch.stack(contexts).transpose(1, 2).contiguous()
+        contexts = self.context_layer(contexts)
+        mel_outputs, gate_outputs, alignments, contexts = self.parse_decoder_outputs(
+            mel_outputs, gate_outputs, alignments, contexts)
 
-        return mel_outputs, gate_outputs, alignments, decoder_hidden_attention_context
+        return mel_outputs, gate_outputs, alignments, contexts
 
     def inference(self, memory):
         """ Decoder inference
@@ -549,14 +555,15 @@ class Decoder(nn.Module):
 
         self.initialize_decoder_states(memory, mask=None)
 
-        mel_outputs, gate_outputs, alignments = [], [], []
+        mel_outputs, gate_outputs, alignments, contexts = [], [], [], []
         while True:
             decoder_input = self.prenet(decoder_input)
-            mel_output, gate_output, alignment, decoder_hidden_attention_context = self.decode(decoder_input)
+            mel_output, gate_output, alignment, context = self.decode(decoder_input)
 
             mel_outputs += [mel_output.squeeze(1)]
             gate_outputs += [gate_output]
             alignments += [alignment]
+            contexts += [context.squeeze(1)]
 
             if torch.sigmoid(gate_output.data) > self.gate_threshold:
                 break
@@ -566,10 +573,12 @@ class Decoder(nn.Module):
 
             decoder_input = mel_output
 
-        mel_outputs, gate_outputs, alignments, decoder_hidden_attention_context = self.parse_decoder_outputs(
-            mel_outputs, gate_outputs, alignments, decoder_hidden_attention_context)
+        contexts = torch.stack(contexts).transpose(1, 2).contiguous()
+        contexts = self.context_layer(contexts)
+        mel_outputs, gate_outputs, alignments, contexts = self.parse_decoder_outputs(
+            mel_outputs, gate_outputs, alignments, contexts)
 
-        return mel_outputs, gate_outputs, alignments
+        return mel_outputs, gate_outputs, alignments, contexts
 
 
 class Tacotron2(nn.Module):
@@ -595,7 +604,7 @@ class Tacotron2(nn.Module):
         self.converter = Converter(
             n_speakers=hparams.n_speakers, speaker_embed_dim=hparams.speaker_embed_dim,
             in_dim=in_dim, out_dim=hparams.filter_length // 2 + 1, dropout=hparams.dropout,
-            time_upsampling=hparams.time_upsampling,
+            time_upsampling=hparams.downsample_step,
             convolutions=[(h, k, 1), (h, k, 3), (2 * h, k, 1), (2 * h, k, 3)],
         )
 
@@ -641,15 +650,16 @@ class Tacotron2(nn.Module):
 
         encoder_outputs = self.encoder(embedded_inputs, input_lengths)
 
-        mel_outputs, gate_outputs, alignments, decoder_hidden_attention_context = self.decoder(
+        mel_outputs, gate_outputs, alignments, contexts = self.decoder(
             encoder_outputs, targets, memory_lengths=input_lengths)
 
         mel_outputs_postnet = self.postnet(mel_outputs)
         mel_outputs_postnet = mel_outputs + mel_outputs_postnet
 
-        postnet_inputs = decoder_hidden_attention_context.view(input_lengths, mel_outputs.size(1), -1)
+        converter_inputs = contexts.view(input_lengths.size(0), mel_outputs.size(2), -1)
 
-        linear_outputs = self.converter(postnet_inputs)
+        linear_outputs = self.converter(converter_inputs)
+        linear_outputs = linear_outputs.transpose(1, 2).contiguous()
         
 
         return self.parse_output(
@@ -660,13 +670,17 @@ class Tacotron2(nn.Module):
         inputs = self.parse_input(inputs)
         embedded_inputs = self.embedding(inputs).transpose(1, 2)
         encoder_outputs = self.encoder.inference(embedded_inputs)
-        mel_outputs, gate_outputs, alignments = self.decoder.inference(
-            encoder_outputs)
+        mel_outputs, gate_outputs, alignments, contexts = self.decoder.inference(encoder_outputs)
 
         mel_outputs_postnet = self.postnet(mel_outputs)
         mel_outputs_postnet = mel_outputs + mel_outputs_postnet
 
+        converter_inputs = contexts.view(inputs.size(0), mel_outputs.size(2), -1)
+
+        linear_outputs = self.converter(converter_inputs)
+        linear_outputs = linear_outputs.transpose(1, 2).contiguous()
+
         outputs = self.parse_output(
-            [mel_outputs, mel_outputs_postnet, gate_outputs, alignments])
+            [mel_outputs, mel_outputs_postnet, gate_outputs, linear_outputs, alignments])
 
         return outputs
