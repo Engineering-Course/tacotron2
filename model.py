@@ -7,6 +7,8 @@ from layers import ConvNorm, LinearNorm
 from utils import to_gpu, get_mask_from_lengths
 from fp16_optimizer import fp32_to_fp16, fp16_to_fp32
 
+from modules import Conv1d, ConvTranspose1d, Conv1dGLU, expand_speaker_embed
+
 
 class LocationLayer(nn.Module):
     def __init__(self, attention_n_filters, attention_kernel_size,
@@ -145,6 +147,113 @@ class Postnet(nn.Module):
         x = F.dropout(self.convolutions[-1](x), 0.5, self.training)
 
         return x
+
+
+
+class Converter(nn.Module):
+    def __init__(self, n_speakers, speaker_embed_dim,
+                 in_dim, out_dim, convolutions=((256, 5, 1),) * 4,
+                 time_upsampling=1,
+                 dropout=0.1):
+        super(Converter, self).__init__()
+        self.dropout = dropout
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.n_speakers = n_speakers
+
+        # Non causual convolution blocks
+        in_channels = convolutions[0][0]
+        # Idea from nyanko
+        if time_upsampling == 4:
+            self.convolutions = nn.ModuleList([
+                Conv1d(in_dim, in_channels, kernel_size=1, padding=0, dilation=1,
+                       std_mul=1.0),
+                ConvTranspose1d(in_channels, in_channels, kernel_size=2,
+                                padding=0, stride=2, std_mul=1.0),
+                Conv1dGLU(n_speakers, speaker_embed_dim,
+                          in_channels, in_channels, kernel_size=3, causal=False,
+                          dilation=1, dropout=dropout, std_mul=1.0, residual=True),
+                Conv1dGLU(n_speakers, speaker_embed_dim,
+                          in_channels, in_channels, kernel_size=3, causal=False,
+                          dilation=3, dropout=dropout, std_mul=4.0, residual=True),
+                ConvTranspose1d(in_channels, in_channels, kernel_size=2,
+                                padding=0, stride=2, std_mul=4.0),
+                Conv1dGLU(n_speakers, speaker_embed_dim,
+                          in_channels, in_channels, kernel_size=3, causal=False,
+                          dilation=1, dropout=dropout, std_mul=1.0, residual=True),
+                Conv1dGLU(n_speakers, speaker_embed_dim,
+                          in_channels, in_channels, kernel_size=3, causal=False,
+                          dilation=3, dropout=dropout, std_mul=4.0, residual=True),
+            ])
+        elif time_upsampling == 2:
+            self.convolutions = nn.ModuleList([
+                Conv1d(in_dim, in_channels, kernel_size=1, padding=0, dilation=1,
+                       std_mul=1.0),
+                ConvTranspose1d(in_channels, in_channels, kernel_size=2,
+                                padding=0, stride=2, std_mul=1.0),
+                Conv1dGLU(n_speakers, speaker_embed_dim,
+                          in_channels, in_channels, kernel_size=3, causal=False,
+                          dilation=1, dropout=dropout, std_mul=1.0, residual=True),
+                Conv1dGLU(n_speakers, speaker_embed_dim,
+                          in_channels, in_channels, kernel_size=3, causal=False,
+                          dilation=3, dropout=dropout, std_mul=4.0, residual=True),
+            ])
+        elif time_upsampling == 1:
+            self.convolutions = nn.ModuleList([
+                # 1x1 convolution first
+                Conv1d(in_dim, in_channels, kernel_size=1, padding=0, dilation=1,
+                       std_mul=1.0),
+                Conv1dGLU(n_speakers, speaker_embed_dim,
+                          in_channels, in_channels, kernel_size=3, causal=False,
+                          dilation=3, dropout=dropout, std_mul=4.0, residual=True),
+            ])
+        else:
+            raise ValueError("Not supported")
+
+        std_mul = 4.0
+        for (out_channels, kernel_size, dilation) in convolutions:
+            if in_channels != out_channels:
+                self.convolutions.append(
+                    Conv1d(in_channels, out_channels, kernel_size=1, padding=0,
+                           dilation=1, std_mul=std_mul))
+                self.convolutions.append(nn.ReLU(inplace=True))
+                in_channels = out_channels
+                std_mul = 2.0
+            self.convolutions.append(
+                Conv1dGLU(n_speakers, speaker_embed_dim,
+                          in_channels, out_channels, kernel_size, causal=False,
+                          dilation=dilation, dropout=dropout, std_mul=std_mul,
+                          residual=True))
+            in_channels = out_channels
+            std_mul = 4.0
+        # Last 1x1 convolution
+        self.convolutions.append(Conv1d(in_channels, out_dim, kernel_size=1,
+                                        padding=0, dilation=1, std_mul=std_mul,
+                                        dropout=dropout))
+
+    def forward(self, x, speaker_embed=None):
+        assert self.n_speakers == 1 or speaker_embed is not None
+
+        # expand speaker embedding for all time steps
+        speaker_embed_btc = expand_speaker_embed(x, speaker_embed)
+        if speaker_embed_btc is not None:
+            speaker_embed_btc = F.dropout(speaker_embed_btc, p=self.dropout, training=self.training)
+
+        # Generic case: B x T x C -> B x C x T
+        x = x.transpose(1, 2)
+
+        for f in self.convolutions:
+            # Case for upsampling
+            if speaker_embed_btc is not None and speaker_embed_btc.size(1) != x.size(-1):
+                speaker_embed_btc = expand_speaker_embed(x, speaker_embed, tdim=-1)
+                speaker_embed_btc = F.dropout(
+                    speaker_embed_btc, p=self.dropout, training=self.training)
+            x = f(x, speaker_embed_btc) if isinstance(f, Conv1dGLU) else f(x)
+
+        # Back to B x T x C
+        x = x.transpose(1, 2)
+
+        return torch.sigmoid(x)
 
 
 class Encoder(nn.Module):
@@ -309,7 +418,7 @@ class Decoder(nn.Module):
         decoder_inputs = decoder_inputs.transpose(0, 1)
         return decoder_inputs
 
-    def parse_decoder_outputs(self, mel_outputs, gate_outputs, alignments):
+    def parse_decoder_outputs(self, mel_outputs, gate_outputs, alignments, decoder_hidden_attention_context):
         """ Prepares decoder outputs for output
         PARAMS
         ------
@@ -336,7 +445,11 @@ class Decoder(nn.Module):
         # (B, T_out, n_mel_channels) -> (B, n_mel_channels, T_out)
         mel_outputs = mel_outputs.transpose(1, 2)
 
-        return mel_outputs, gate_outputs, alignments
+        # decoder state (B x T x C):
+        # internal representation before compressed to output dimention
+        decoder_hidden_attention_context = decoder_hidden_attention_context.transpose(1, 2).contiguous()
+
+        return mel_outputs, gate_outputs, alignments, decoder_hidden_attention_context
 
     def decode(self, decoder_input):
         """ Decoder step using stored states, attention and memory
@@ -381,7 +494,7 @@ class Decoder(nn.Module):
             decoder_hidden_attention_context)
 
         gate_prediction = self.gate_layer(decoder_hidden_attention_context)
-        return decoder_output, gate_prediction, self.attention_weights
+        return decoder_output, gate_prediction, self.attention_weights, decoder_hidden_attention_context
 
     def forward(self, memory, decoder_inputs, memory_lengths):
         """ Decoder forward pass for training
@@ -409,16 +522,16 @@ class Decoder(nn.Module):
         mel_outputs, gate_outputs, alignments = [], [], []
         while len(mel_outputs) < decoder_inputs.size(0) - 1:
             decoder_input = decoder_inputs[len(mel_outputs)]
-            mel_output, gate_output, attention_weights = self.decode(
+            mel_output, gate_output, attention_weights, decoder_hidden_attention_context = self.decode(
                 decoder_input)
             mel_outputs += [mel_output.squeeze(1)]
             gate_outputs += [gate_output.squeeze()]
             alignments += [attention_weights]
 
-        mel_outputs, gate_outputs, alignments = self.parse_decoder_outputs(
-            mel_outputs, gate_outputs, alignments)
+        mel_outputs, gate_outputs, alignments, decoder_hidden_attention_context = self.parse_decoder_outputs(
+            mel_outputs, gate_outputs, alignments, decoder_hidden_attention_context)
 
-        return mel_outputs, gate_outputs, alignments
+        return mel_outputs, gate_outputs, alignments, decoder_hidden_attention_context
 
     def inference(self, memory):
         """ Decoder inference
@@ -439,7 +552,7 @@ class Decoder(nn.Module):
         mel_outputs, gate_outputs, alignments = [], [], []
         while True:
             decoder_input = self.prenet(decoder_input)
-            mel_output, gate_output, alignment = self.decode(decoder_input)
+            mel_output, gate_output, alignment, decoder_hidden_attention_context = self.decode(decoder_input)
 
             mel_outputs += [mel_output.squeeze(1)]
             gate_outputs += [gate_output]
@@ -453,8 +566,8 @@ class Decoder(nn.Module):
 
             decoder_input = mel_output
 
-        mel_outputs, gate_outputs, alignments = self.parse_decoder_outputs(
-            mel_outputs, gate_outputs, alignments)
+        mel_outputs, gate_outputs, alignments, decoder_hidden_attention_context = self.parse_decoder_outputs(
+            mel_outputs, gate_outputs, alignments, decoder_hidden_attention_context)
 
         return mel_outputs, gate_outputs, alignments
 
@@ -475,19 +588,32 @@ class Tacotron2(nn.Module):
         self.decoder = Decoder(hparams)
         self.postnet = Postnet(hparams)
 
+
+        in_dim = hparams.prenet_dim
+        h = hparams.converter_channels
+        k = hparams.converter_kernel_size
+        self.converter = Converter(
+            n_speakers=hparams.n_speakers, speaker_embed_dim=hparams.speaker_embed_dim,
+            in_dim=in_dim, out_dim=hparams.filter_length // 2 + 1, dropout=hparams.dropout,
+            time_upsampling=hparams.time_upsampling,
+            convolutions=[(h, k, 1), (h, k, 3), (2 * h, k, 1), (2 * h, k, 3)],
+        )
+
+
     def parse_batch(self, batch):
-        text_padded, input_lengths, mel_padded, gate_padded, \
+        text_padded, input_lengths, mel_padded, gate_padded, linear_padded, \
             output_lengths = batch
         text_padded = to_gpu(text_padded).long()
         input_lengths = to_gpu(input_lengths).long()
         max_len = torch.max(input_lengths.data).item()
         mel_padded = to_gpu(mel_padded).float()
         gate_padded = to_gpu(gate_padded).float()
+        linear_padded = to_gpu(linear_padded).float()
         output_lengths = to_gpu(output_lengths).long()
 
         return (
             (text_padded, input_lengths, mel_padded, max_len, output_lengths),
-            (mel_padded, gate_padded))
+            (mel_padded, gate_padded, linear_padded))
 
     def parse_input(self, inputs):
         inputs = fp32_to_fp16(inputs) if self.fp16_run else inputs
@@ -515,14 +641,19 @@ class Tacotron2(nn.Module):
 
         encoder_outputs = self.encoder(embedded_inputs, input_lengths)
 
-        mel_outputs, gate_outputs, alignments = self.decoder(
+        mel_outputs, gate_outputs, alignments, decoder_hidden_attention_context = self.decoder(
             encoder_outputs, targets, memory_lengths=input_lengths)
 
         mel_outputs_postnet = self.postnet(mel_outputs)
         mel_outputs_postnet = mel_outputs + mel_outputs_postnet
 
+        postnet_inputs = decoder_hidden_attention_context.view(input_lengths, mel_outputs.size(1), -1)
+
+        linear_outputs = self.converter(postnet_inputs)
+        
+
         return self.parse_output(
-            [mel_outputs, mel_outputs_postnet, gate_outputs, alignments],
+            [mel_outputs, mel_outputs_postnet, gate_outputs, linear_outputs, alignments],
             output_lengths)
 
     def inference(self, inputs):

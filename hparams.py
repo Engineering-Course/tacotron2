@@ -24,9 +24,9 @@ def create_hparams(hparams_string=None, verbose=False):
         ################################
         # Data Parameters             #
         ################################
-        load_mel_from_disk=False,
-        training_files='filelists/ljs_audio_text_train_filelist.txt',
-        validation_files='filelists/ljs_audio_text_val_filelist.txt',
+        load_mel_from_disk=True,
+        training_files='ljspeech/ljs_train.txt',
+        validation_files='ljspeech/ljs_val.txt',
         text_cleaners=['english_cleaners'],
 
         ################################
@@ -70,9 +70,17 @@ def create_hparams(hparams_string=None, verbose=False):
         attention_location_kernel_size=31,
 
         # Mel-post processing network parameters
-        postnet_embedding_dim=512,
-        postnet_kernel_size=5,
+        postnet_embedding_dim=256,
+        postnet_kernel_size=3,
         postnet_n_convolutions=5,
+
+        # converter parameters
+        converter_channels=256,
+        n_speakers=1,
+        speaker_embed_dim=16,
+        dropout=0.05,
+        downsample_step=2,
+        converter_kernel_size=3,
 
         ################################
         # Optimization Hyperparameters #

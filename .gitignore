@@ -4,6 +4,7 @@ __pycache__/
 filelists/
 .ipynb_checkpoints/
 results/
+data/
 
 *.so
 *.pyc
