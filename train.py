@@ -3,6 +3,7 @@ import time
 import argparse
 import math
 from numpy import finfo
+import numpy as np
 
 import torch
 from distributed import apply_gradient_allreduce
@@ -59,7 +60,7 @@ def prepare_dataloaders(hparams):
     train_sampler = DistributedSampler(trainset) \
         if hparams.distributed_run else None
 
-    train_loader = DataLoader(trainset, num_workers=1, shuffle=False,
+    train_loader = DataLoader(trainset, num_workers=2, shuffle=False,
                               sampler=train_sampler,
                               batch_size=hparams.batch_size, pin_memory=False,
                               drop_last=True, collate_fn=collate_fn)
@@ -129,7 +130,7 @@ def validate(model, criterion, valset, iteration, batch_size, n_gpus,
                                 shuffle=False, batch_size=batch_size,
                                 pin_memory=False, collate_fn=collate_fn)
 
-        val_loss = 0.0
+        val_loss = []
         for i, batch in enumerate(val_loader):
             x, y = model.parse_batch(batch)
             y_pred = model(x)
@@ -138,13 +139,16 @@ def validate(model, criterion, valset, iteration, batch_size, n_gpus,
                 reduced_val_loss = reduce_tensor(loss.data, n_gpus).item()
             else:
                 reduced_val_loss = loss.item()
-            val_loss += reduced_val_loss
-        val_loss = val_loss / (i + 1)
+            val_loss.append(reduced_val_loss)
+
+            logger.log_validation(reduced_val_loss, model, y, y_pred, iteration)
+
+        val_loss = np.mean(val_loss)
 
     model.train()
     if rank == 0:
-        print("Validation loss {}: {:9f}  ".format(iteration, reduced_val_loss))
-        logger.log_validation(val_loss, model, y, y_pred, iteration)
+        print("Validation loss {}: {:9f}  ".format(iteration, val_loss))
+
 
 
 def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
